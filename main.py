@@ -92,11 +92,4 @@ class AI(Player):
         
       self.shuffle_env()
 
-ia = AI()
-ia.model.summary()
-
-# 1 : Predict action
-# 2 : Do action
-# 3 : Save reward, state and action
-# 4 : Restart the process and 1 time on 2O, go next step
-# 5 : Train the model with the collected data and restart
+AI()
