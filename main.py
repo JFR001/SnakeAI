@@ -1,101 +1,102 @@
-import asyncio
-import json
-import discord
-from discord import app_commands
-from discord.ext import commands
-from discord import FFmpegPCMAudio
+import tensorflow as tf
+import numpy as np
+import random as rd
+from player import Player
 
+class AI(Player):
+  def __init__(self):
+    super().__init__()
+    self.model = tf.keras.models.Sequential()
+    self.model.add(tf.keras.layers.InputLayer(input_shape=(91)))
+    self.model.add(tf.keras.layers.Dense(256, activation='relu'))
+    self.model.add(tf.keras.layers.Dense(128, activation='relu'))
+    self.model.add(tf.keras.layers.Dense(3, activation='softmax'))
+    self.buffer = [] # Will be shuffle with random.shuffle()
+    
+    self.gamma = 0.99
+    self.eps = 1
+    
+    self.model.compile(optimizer='adam', loss='mean_squared_error', metrics=["accuracy"])#loss='sparse_categorical_crossentropy')
+    
+    self.train()
+            
+  def normalize_for_input(self, grid, direction):
+    direction_index = self.actions.index(direction)
+    input = list(np.append(grid.flatten(), direction_index))
+    return input
 
-token = input("Token de votre bot: ")
-guild_id = input("ID de votre serveur: ")
+  def predict_action(self, input):
+    prediction = self.model.predict([input])[0]
+    predicted_action = int(np.where(prediction == max(prediction))[0][0])
+    return predicted_action
 
-intents = discord.Intents().all()
-bot = commands.Bot(command_prefix="$", intents=intents)
+  def fit_model(self):
+    rd.shuffle(self.buffer)
+    
+    def get_Q_target(r, st1):
+      Q_stp1 = self.model.predict([st1])[0]
+      Q_target = r + max(Q_stp1) * self.gamma
+      return Q_target
 
-with open('data.json', 'r') as file:
-    json_data = json.load(file)
+    x_train = []
+    y_train = []
+    
+    for sars1 in self.buffer:
+      target = [0, 0, 0]
+      Q_target = get_Q_target(sars1['r'], sars1['st+1'])
+      target[sars1['at']] = Q_target
+      
+      x_train.append(sars1['st'])
+      y_train.append(target)
+      
+    self.model.fit(x_train, y_train, batch_size=32, epochs=100)
+    loss, accuracy = self.model.evaluate(x_train, y_train)
+    print('Loss : %s   Accuracy : %s' % (loss, accuracy))
+    
+  def shuffle_env(self):
+    self.loop_punishment = 0
+    self.tail = []
+    self.x = rd.randint(0, 9)
+    self.y = rd.randint(0, 8)
+    self.direction = rd.choice(self.actions)
+    self.generate_apple()
+    self.update_grid([self.x, self.y], self.tail)
+    
+  def train(self):
+    for epoch in range(401):
+      step = 0
+      while step < 200:
+        st = self.normalize_for_input(self.grid, self.direction)
+        at = self.predict_action(st)
+        self.take_action(at)
+        r = self.step()
+        st1 = self.normalize_for_input(self.grid, self.direction)
 
-intents.message_content = True
-intents.guilds = True
-intents.members = True
-intents.voice_states = True
-coming_peaple_voc = 0
-current_channel_id = None
+        if r == -5:
+          st1 = st
+          self.shuffle_env()
 
-@bot.event
-async def on_ready():
-    print(f"{bot.user.name} s'est bien connecté")
-    try:
-        synced = await bot.tree.sync(guild=discord.Object(id=guild_id))
-        print(f"Synced {len(synced)} commands")
+        print('Reward : %s   Step : %s' % (r, step))
 
-    except Exception as e:
-        print(e)
+        self.buffer.append({'st': st, 'at': at, 'r': r, 'st+1': st1})
 
-@bot.event
-async def on_voice_state_update(member, before, after):
-    global coming_peaple_voc
-    global current_channel_id
-    global json_data
-    # Vérifiez si le membre est un bot
-    if member.bot:
-        return
-    if before.channel is None and after.channel is not None and after.channel.id == json_data["bonjour_channel_id"] and len(member.guild.get_channel(json_data["bonjour_channel_id"]).members) > 1:
-        print(f'{member.name} a rejoint le canal {after.channel.name}')
-        # Vérifiez si le bot est déjà connecté à un canal vocal dans ce serveur
-        if bot.voice_clients and member.guild in [vc.guild for vc in bot.voice_clients]:
-            for vc in bot.voice_clients:
-                if vc.guild == member.guild:
-                    print(f'Le bot était déjà dans le channel {after.channel.name}')
+        if len(self.buffer) > 10000:
+          self.buffer = self.buffer[1:]
 
-        # Le bot n'est pas connecté à un canal vocal dans ce serveur, alors connectez-le
-        else:
-            coming_peaple_voc += 1
-            try:
-                vc = await after.channel.connect()
-                print(f'Le bot a été connecté au canal {after.channel.name}')
+        step += 1
+        
+      self.eps = max(0.1, self.eps*0.99)
+        
+      if epoch % 5 == 0 and epoch != 0:
+        self.fit_model()
+        
+      self.shuffle_env()
 
-            except discord.errors.ClientException:
-                print("Le bot est déjà connecté à un autre canal vocal.")
+ia = AI()
+ia.model.summary()
 
-            while coming_peaple_voc > 0:
-                await asyncio.sleep(1.5)
-                if vc.is_connected():
-                    vc.play(FFmpegPCMAudio("son.mp3"))
-                    while vc.is_playing():
-                        await asyncio.sleep(1.5)
-                coming_peaple_voc -= 1
-            await vc.disconnect()
-
-
-def is_owner():
-    def predicate(interaction: discord.Interaction):
-        if interaction.user.guild_permissions.administrator:
-            return True
-    return app_commands.check(predicate)
-
-
-@bot.tree.command(guild=discord.Object(id=guild_id), name="salonbonjour", description="atest command")
-@is_owner()
-async def salonbonjour_slash(interaction: discord.Interaction, channel_id: str):
-    global json_data
-    try:
-        channel = discord.utils.get(interaction.user.guild.channels, id=int(channel_id))
-    except ValueError:
-        await interaction.response.send_message("ID de channel invalide. Assurez-vous que c'est un nombre.", ephemeral=True)
-        return
-
-    if channel is not None:
-        if isinstance(channel, discord.VoiceChannel) and int(channel_id) != json_data["bonjour_channel_id"]:
-            await interaction.response.send_message(f"Le channel vocal Bonjour à bien été déplacé sur le channel {channel}.", ephemeral=True)
-            json_data["bonjour_channel_id"] = int(channel_id)
-            with open('data.json', 'w') as file:
-                json.dump(json_data, file)
-        elif int(channel_id) == json_data["bonjour_channel_id"]:
-            await interaction.response.send_message(f"Le channel vocal Bonjour est déjà sur le channel {channel}.", ephemeral=True)
-        else:
-            await interaction.response.send_message("Ce channel n'est pas un channel vocal.", ephemeral=True)
-    else:
-        await interaction.response.send_message("ID de channel invalide.", ephemeral=True)
-
-bot.run(token)
+# 1 : Predict action
+# 2 : Do action
+# 3 : Save reward, state and action
+# 4 : Restart the process and 1 time on 2O, go next step
+# 5 : Train the model with the collected data and restart
